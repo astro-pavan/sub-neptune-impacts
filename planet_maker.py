@@ -162,35 +162,39 @@ def create_2_layer_planet_v2(M_planet, R_planet, P_surface, T_surface, materials
 
 def create_3_layer_planet(M_planet, R_planet, P_surface, T_surface, materials):
 
-    fun = lambda x:\
-        integrate_planet(M_planet, R_planet, P_surface, T_surface, materials, [1 - x[0] - x[1], x[0], x[1]])
+    fun = lambda x: integrate_planet(M_planet, R_planet, P_surface, T_surface, materials, [x[0], x[1], 1 - x[0] - x[1]])[1]
 
-    res = root(fun, [0.1, 0.1], method='df-sane')
+    n0, n1 = 4, 4
 
-    print(res.message)
+    x0, x1 = np.meshgrid(np.linspace(0.282, 0.284, num=n0), np.linspace(0.695, 0.705, num=n1))
 
-    f1 = res.x[0]
-    f2 = res.x[1]
+    r_end_grid = np.zeros_like(x0)
 
-    print(f'Core: {f2:.2%} Mantle: {f1:.2%} Ocean: {1 - f1 - f2:.2%}')
+    for i0 in range(n0):
+        for i1 in range(n1):
+            x = np.array([x0[i0, i1], x1[i0, i1]])
+            try:
+                r_end_grid[i0, i1] = fun(x)
+            except Exception:
+                r_end_grid[i0, i1] = 1e9
 
-    df = integrate_planet(M_planet, R_planet, P_surface, T_surface, materials, [1 - f1 - f2, f1, f2], return_df=True)[2]
-
-    plt.plot(df['r'] / R_earth, df['m'] / M_earth)
+    plt.contourf(x0, x1, np.log10(np.abs(r_end_grid)))
+    plt.colorbar()
     plt.show()
 
+    # res = root(fun, [0.1, 0.1], method='df-sane')
+    #
+    # print(res.message)
+    #
+    # f1 = res.x[0]
+    # f2 = res.x[1]
+    #
+    # print(f'Core: {f2:.2%} Mantle: {f1:.2%} Ocean: {1 - f1 - f2:.2%}')
+    #
+    # df = integrate_planet(M_planet, R_planet, P_surface, T_surface, materials, [1 - f1 - f2, f1, f2], return_df=True)[2]
+    #
+    # plt.plot(df['r'] / R_earth, df['m'] / M_earth)
+    # plt.show()
 
-# create_2_layer_planet_v2(6e24, 6.4e6, 1e5, 1500, [400, 401])
 
 create_3_layer_planet(4.8 * M_earth, 2.1 * R_earth, 1e5, 400, [304, 400, 401])
-
-# m, r, P, T, rho = integrate_material(5 * M_earth, (5 * 0.7) * M_earth, 2 * R_earth, 1e5, 400, 304)
-#
-# plt.plot(r / R_earth, T)
-# plt.show()
-
-# df = integrate_planet(5 * M_earth, 2 * R_earth, 1e5, 1500, [304, 400, 401], [0.1, 0.6, 0.3], return_df=True)[2]
-#
-# plt.plot(df['r'] / R_earth, df['rho'] / 1000)
-# plt.yscale('log')
-# plt.show()
