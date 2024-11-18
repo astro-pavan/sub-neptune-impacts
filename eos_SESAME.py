@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from numba import njit
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, LinearNDInterpolator
 from scipy.optimize import root_scalar, root, minimize
 from tqdm import tqdm
 
@@ -91,7 +91,7 @@ class eos:
         # setting a minimum pressure for the EOS at 1 Pa and a maximum at 1 TPa
         self.P_min, self.P_max = np.maximum(1, np.min(self.A2_P)), np.minimum(np.max(self.A2_P), 1e12)
         # setting a minimum entropy for the EOS at 1 J/K/kg
-        self.s_min, self.s_max = np.maximum(np.min(self.A2_s), 1), np.max(self.A2_s)
+        self.s_min, self.s_max = np.maximum(np.min(self.A2_s), 1), np.minimum(np.max(self.A2_s), 10000)
 
         # create log arrays for rho and P
 
@@ -108,14 +108,16 @@ class eos:
             (self.A1_rho, self.A1_T),
             self.A2_P,
             method=interpolator_method,
-            fill_value=None
+            fill_value=None,
+            bounds_error=True
         )
 
         self.s_interpolator = RegularGridInterpolator(
             (self.A1_rho, self.A1_T),
             self.A2_s,
             method=interpolator_method,
-            fill_value=None
+            fill_value=None,
+            bounds_error=True
         )
 
         # invert the P and s tables to get interpolators for rho(P, T), rho(P, s), T(P, s)
@@ -136,42 +138,51 @@ class eos:
 
         def find_xy_for_zw(z, w, interp_z, interp_w, x0, y0):
             # function to invert z(x, y) and w(x, y) to x(z, w) and y(z, w)
-            error = lambda x: ((interp_z(x)[0] - z) / z) ** 2 + ((interp_w(x)[0] - w) / w) ** 2
-            #sol = root(lambda x: [interp_z(x)[0] - z, interp_w(x)[0] - w], x0=np.array([x0, y0]))
-            sol = minimize(error, x0=np.array([x0, y0]), bounds=((self.rho_min, self.rho_max), (self.T_min, self.T_max)))
+            #error = lambda x: ((interp_z(x)[0] - z) / z) ** 2 + ((interp_w(x)[0] - w) / w) ** 2
+            sol = root(lambda x: [interp_z(x)[0] - z, interp_w(x)[0] - w], x0=np.array([x0, y0]))
+            #sol = minimize(error, x0=np.array([x0, y0]), bounds=((self.rho_min, self.rho_max), (self.T_min, self.T_max)))
             return sol.x if sol.success else np.array([np.nan, np.nan])
 
-        n = 50
+        n = 100
 
         self.A1_P = np.logspace(np.log10(self.P_min), np.log10(self.P_max), num=n)
         self.A1_s = np.logspace(np.log10(self.s_min), np.log10(self.s_max), num=n)
 
         self.A2_rho_PT = np.empty((n, self.num_T), dtype=float)
-        self.A2_rho_Ps = np.empty((n, n), dtype=float)
-        self.A2_T_Ps = np.empty((n, n), dtype=float)
+        # self.A2_rho_Ps = np.empty((n, n), dtype=float)
+        # self.A2_T_Ps = np.empty((n, n), dtype=float)
+
+        A1_rho_Ps, A1_T_Ps = [], []
+        Ps_interpolation_points = []
 
         for i, P in tqdm(enumerate(self.A1_P)):
             for j, s in enumerate(self.A1_s):
-                rho_mid, T_mid = (self.rho_min + self.rho_max) / 2, (self.T_min + self.T_max) / 2
-
                 combined_error = np.sqrt(((self.A2_P - P) / P) ** 2 + ((self.A2_s - s) / s) ** 2)
-                multi_index = np.unravel_index(np.argmin(combined_error), combined_error.shape)
-                rho_guess, T_guess = self.A1_rho[multi_index[1]], self.A1_rho[multi_index[0]]
+                log_min_error = np.nanmin(np.log10(combined_error))
 
-                plt.contourf(self.A1_T, self.A1_rho, np.log10(combined_error), 200)
-                plt.colorbar()
-                plt.xscale('log')
-                plt.yscale('log')
-                plt.show()
+                if log_min_error < -2:
+                    multi_index = np.unravel_index(np.argmin(combined_error), combined_error.shape)
+                    rho_guess, T_guess = self.A1_rho[multi_index[0]], self.A1_T[multi_index[1]]
 
-                rho, T = find_xy_for_zw(P, s, self.P_interpolator, self.s_interpolator, rho_guess, T_guess)
-                P_test, s_test = self.P_rhoT(rho, T), self.s_rhoT(rho, T)
-                P_error, s_error = np.abs(P - P_test) / P, np.abs(s - s_test) / s
+                    try:
 
-                assert P_error < 0.05 and s_error < 0.05
+                        rho, T = find_xy_for_zw(P, s, self.P_interpolator, self.s_interpolator, rho_guess, T_guess)
+                        P_test, s_test = self.P_rhoT(rho, T), self.s_rhoT(rho, T)
+                        P_error, s_error = np.abs(P - P_test) / P, np.abs(s - s_test) / s
 
-                self.A2_rho_Ps[i, j] = rho
-                self.A2_T_Ps[i, j] = T
+                        assert P_error < 0.05 and s_error < 0.05
+
+                        Ps_interpolation_points.append([P, s])
+                        A1_rho_Ps.append(rho)
+                        A1_T_Ps.append(T)
+
+                    except OutOfEOSRangeException:
+                        pass
+                    except ValueError:
+                        pass
+
+        Ps_interpolation_points = np.array(Ps_interpolation_points)
+        A1_rho_Ps, A1_T_Ps = np.array(A1_rho_Ps), np.array(A1_T_Ps)
 
         for i, P in tqdm(enumerate(self.A1_P)):
             for j, T in enumerate(self.A1_T):
@@ -187,21 +198,19 @@ class eos:
             (self.A1_P, self.A1_T),
             self.A2_rho_PT,
             method=interpolator_method,
-            fill_value=None
+            fill_value=np.nan
         )
 
-        self.rho_Ps_interpolator = RegularGridInterpolator(
-            (self.A1_P, self.A1_s),
-            self.A2_rho_Ps,
-            method=interpolator_method,
-            fill_value=None
+        self.rho_Ps_interpolator = LinearNDInterpolator(
+            Ps_interpolation_points,
+            A1_rho_Ps,
+            fill_value=np.nan
         )
 
-        self.T_Ps_interpolator = RegularGridInterpolator(
-            (self.A1_P, self.A1_s),
-            self.A2_T_Ps,
-            method=interpolator_method,
-            fill_value=None
+        self.T_Ps_interpolator = LinearNDInterpolator(
+            Ps_interpolation_points,
+            A1_T_Ps,
+            fill_value=np.nan
         )
 
         print('Interpolators initialized.')
@@ -231,17 +240,19 @@ class eos:
 
     def s_PT(self, P, T):
         self.input_check(None, T, P, None)
+        return self.s_rhoT(self.rho_PT(P, T), T)
 
     def rho_PT(self, P, T):
         self.input_check(None, T, P, None)
+        return self.rho_PT_interpolator(make_into_pair_array(P, T))
 
     def rho_Ps(self, P, s):
         self.input_check(None, None, P, s)
-        return self.rho_Ps_interpolator(make_into_pair_array(P, s))
+        return self.rho_Ps_interpolator(P, s)
 
     def T_Ps(self, P, s):
         self.input_check(None, None, P, s)
-        return self.T_Ps_interpolator(make_into_pair_array(P, s))
+        return self.T_Ps_interpolator(P, s)
 
 
 class OutOfEOSRangeException(Exception):
@@ -251,4 +262,6 @@ class OutOfEOSRangeException(Exception):
         super.__init__(message)
 
 
-WATER = eos('data/AQUA_H20.txt', 'Water', 304)
+#WATER = eos('data/AQUA_H20.txt', 'Water', 304)
+FORSTERITE = eos('data/ANEOS_forsterite_S19.txt', 'Forsterite', 400)
+IRON = eos('data/ANEOS_iron_S20.txt', 'Iron', 401)
