@@ -145,18 +145,21 @@ class eos:
 
         n = 100
 
-        self.A1_P = np.logspace(np.log10(self.P_min), np.log10(self.P_max), num=n)
-        self.A1_s = np.logspace(np.log10(self.s_min), np.log10(self.s_max), num=n)
+        A1_P = np.logspace(np.log10(self.P_min), np.log10(self.P_max), num=n)
+        A1_s = np.logspace(np.log10(self.s_min), np.log10(self.s_max), num=n)
 
-        self.A2_rho_PT = np.empty((n, self.num_T), dtype=float)
+        # self.A2_rho_PT = np.empty((n, self.num_T), dtype=float)
         # self.A2_rho_Ps = np.empty((n, n), dtype=float)
         # self.A2_T_Ps = np.empty((n, n), dtype=float)
+
+        A1_rho_PT = []
+        PT_interpolation_points = []
 
         A1_rho_Ps, A1_T_Ps = [], []
         Ps_interpolation_points = []
 
-        for i, P in tqdm(enumerate(self.A1_P)):
-            for j, s in enumerate(self.A1_s):
+        for i, P in tqdm(enumerate(A1_P)):
+            for j, s in enumerate(A1_s):
                 combined_error = np.sqrt(((self.A2_P - P) / P) ** 2 + ((self.A2_s - s) / s) ** 2)
                 log_min_error = np.nanmin(np.log10(combined_error))
 
@@ -181,23 +184,30 @@ class eos:
                     except ValueError:
                         pass
 
-        Ps_interpolation_points = np.array(Ps_interpolation_points)
-        A1_rho_Ps, A1_T_Ps = np.array(A1_rho_Ps), np.array(A1_T_Ps)
-
-        for i, P in tqdm(enumerate(self.A1_P)):
+        for i, P in tqdm(enumerate(A1_P)):
             for j, T in enumerate(self.A1_T):
-                rho = find_x_for_yz(T, P, self.P_interpolator, self.rho_min, self.rho_max)
-                P_test = self.P_rhoT(rho, T)
-                P_error = np.abs(P - P_test) / P
 
-                assert P_error < 0.05
+                try:
+                    rho = find_x_for_yz(T, P, self.P_interpolator, self.rho_min, self.rho_max)
+                    P_test = self.P_rhoT(rho, T)
+                    P_error = np.abs(P - P_test) / P
 
-                self.A2_rho_PT[i, j] = rho
+                    assert P_error < 0.05
 
-        self.rho_PT_interpolator = RegularGridInterpolator(
-            (self.A1_P, self.A1_T),
-            self.A2_rho_PT,
-            method=interpolator_method,
+                    PT_interpolation_points.append([P, T])
+                    A1_rho_PT.append(rho)
+
+                    # self.A2_rho_PT[i, j] = rho
+                except ValueError:
+                    pass
+
+        PT_interpolation_points = np.array(PT_interpolation_points)
+        Ps_interpolation_points = np.array(Ps_interpolation_points)
+        A1_rho_PT, A1_rho_Ps, A1_T_Ps = np.array(A1_rho_PT), np.array(A1_rho_Ps), np.array(A1_T_Ps)
+
+        self.rho_PT_interpolator = LinearNDInterpolator(
+            PT_interpolation_points,
+            A1_rho_PT,
             fill_value=np.nan
         )
 
@@ -244,7 +254,7 @@ class eos:
 
     def rho_PT(self, P, T):
         self.input_check(None, T, P, None)
-        return self.rho_PT_interpolator(make_into_pair_array(P, T))
+        return self.rho_PT_interpolator(P, T)
 
     def rho_Ps(self, P, s):
         self.input_check(None, None, P, s)
