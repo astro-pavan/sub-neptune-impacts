@@ -48,16 +48,6 @@ def make_into_pair_array(arr1, arr2):
 
 
 def find_curve_intersections(curve1, curve2):
-    """
-    Efficiently find all intersection points between two curves in the xy-plane using Shapely.
-
-    Parameters:
-    curve1, curve2: numpy arrays of shape (n, 2)
-        Each array represents a curve as a sequence of points in the xy-plane.
-
-    Returns:
-    intersections: List of tuples [(x1, y1), (x2, y2), ...] where the curves intersect.
-    """
     # Convert curves to Shapely LineString objects
     line1 = LineString(curve1)
     line2 = LineString(curve2)
@@ -73,7 +63,9 @@ def find_curve_intersections(curve1, curve2):
         return [(intersection.x, intersection.y)]  # Single intersection
 
     if intersection.geom_type == 'MultiPoint':
-        return [(point.x, point.y) for point in intersection]
+        x = intersection.bounds[0]
+        y = intersection.bounds[1]
+        return [(x, y)]
 
     return []  # Default case (e.g., no valid intersections)
 
@@ -135,116 +127,98 @@ class eos:
 
         interpolator_method = 'linear'
 
-        self.P_interpolator = RegularGridInterpolator(
-            (self.A1_rho, self.A1_T), self.A2_P,
-            method=interpolator_method, fill_value=None, bounds_error=True
+        self.logP_interpolator = RegularGridInterpolator(
+            (self.A1_log_rho, self.A1_T), self.A2_log_P,
+            method=interpolator_method, fill_value=None, bounds_error=False
         )
 
         self.s_interpolator = RegularGridInterpolator(
-            (self.A1_rho, self.A1_T), self.A2_s,
-            method=interpolator_method, fill_value=None, bounds_error=True
+            (self.A1_log_rho, self.A1_T), self.A2_s,
+            method=interpolator_method, fill_value=None, bounds_error=False
         )
 
         X, Y = np.meshgrid(self.A1_T, self.A1_rho)
 
-        # invert the P and s tables to get interpolators for rho(P, T), rho(P, s), T(P, s)
+        if load_tables:
+            rho_logPT_interpolation_points = np.load(f'data/extra/{material_name}-rho-logPT.npy')
+            rhoT_logPs_interpolation_points = np.load(f'data/extra/{material_name}-rhoT-logPs.npy')
 
-        A1_log_P = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-        A1_s = np.array([100, 200, 300, 400, 500, 600, 700, 800, 900,
-                         1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 15000, 20000])
+        else:
+            # invert the P and s tables to get interpolators for rho(P, T), rho(P, s), T(P, s)
 
-        n = 50
-        A1_log_P = np.linspace(1, 12, num=n)
-        A1_s = np.logspace(2, np.log10(20000), num=n)
+            n = 200
+            A1_log_P = np.linspace(1, 12, num=n)
+            A1_s = np.logspace(2, 5, num=n)
 
-        rhoT_Ps_interpolation_points = []
+            rhoT_logPs_interpolation_points = []
+            rho_logPT_interpolation_points = []
 
-        log_P_contours = plt.contour(X, Y, np.log10(self.A2_P), A1_log_P)
-        s_contours = plt.contour(X, Y, self.A2_s, A1_s)
+            log_P_contours = plt.contour(X, Y, np.log10(self.A2_P), A1_log_P)
+            s_contours = plt.contour(X, Y, self.A2_s, A1_s)
 
-        log_P_contour_points = []
-        for collection in log_P_contours.collections:
-            contour_lines = []
+            log_P_contour_points = []
+            for collection in log_P_contours.collections:
+                contour_lines = []
+                for path in collection.get_paths():
+                    vertices = path.vertices
+                    contour_lines.append(vertices)
+                log_P_contour_points.append(contour_lines)
 
-            for path in collection.get_paths():
-                vertices = path.vertices
-                contour_lines.append(vertices)
+            s_contour_points = []
+            for collection in s_contours.collections:
+                contour_lines = []
+                for path in collection.get_paths():
+                    vertices = path.vertices
+                    contour_lines.append(vertices)
+                s_contour_points.append(contour_lines)
 
-            log_P_contour_points.append(contour_lines)
+            plt.close()
 
-        s_contour_points = []
-        for collection in s_contours.collections:
-            contour_lines = []
+            for i_log_P, log_P in enumerate(A1_log_P):
 
-            for path in collection.get_paths():
-                vertices = path.vertices
-                contour_lines.append(vertices)
+                rho, T = log_P_contour_points[i_log_P][0][:, 1], log_P_contour_points[i_log_P][0][:, 0]
+                rho_logPT_interpolation_points.append(np.array([rho, np.full_like(rho, log_P), T]).T)
 
-            s_contour_points.append(contour_lines)
+                for i_s, s in enumerate(A1_s):
 
-        # plt.xscale('log')
-        # plt.yscale('log')
-        plt.close()
+                    intersection = find_curve_intersections(log_P_contour_points[i_log_P][0], s_contour_points[i_s][0])
 
-        invalid_point_count = 0
+                    if len(intersection) > 0:
+                        T, rho = intersection[0]
+                        P = 10 ** log_P
 
-        for i_log_P, log_P in enumerate(A1_log_P):
-            for i_s, s in enumerate(A1_s):
+                        P_test, s_test = self.P_rhoT(rho, T)[0], self.s_rhoT(rho, T)[0]
+                        P_error, s_error = np.abs(P_test - P) / P, np.abs(s_test - s) / s
 
-                intersection = find_curve_intersections(log_P_contour_points[i_log_P][0], s_contour_points[i_s][0])
+                        if P_error < 0.1 and s_error < 0.1:
+                            rhoT_logPs_interpolation_points.append([rho, T, log_P, s])
 
-                if len(intersection) > 0:
-                    T, rho = intersection[0]
-                    P = 10 ** log_P
+            rho_logPT_interpolation_points = np.vstack(rho_logPT_interpolation_points)
+            rhoT_logPs_interpolation_points = np.array(rhoT_logPs_interpolation_points)
 
-                    P_test, s_test = self.P_rhoT(rho, T)[0], self.s_rhoT(rho, T)[0]
-                    P_error, s_error = np.abs(P_test - P) / P, np.abs(s_test - s) / s
+            np.save(f'data/extra/{material_name}-rho-logPT.npy', rho_logPT_interpolation_points)
+            np.save(f'data/extra/{material_name}-rhoT-logPs.npy', rhoT_logPs_interpolation_points)
 
-                    #print(f'{P_error + s_error:.2e}')
+        self.rho_logPT_interpolator = LinearNDInterpolator(
+            rho_logPT_interpolation_points[:, 1:],
+            rho_logPT_interpolation_points[:, 0],
+            fill_value=np.nan,
+            rescale=True
+        )
 
-                    if P_error < 0.1 and s_error < 0.1:
-                        rhoT_Ps_interpolation_points.append([rho, T, P, s])
-                    else:
-                        invalid_point_count += 1
+        self.rho_logPs_interpolator = LinearNDInterpolator(
+            rhoT_logPs_interpolation_points[:, 2:],
+            rhoT_logPs_interpolation_points[:, 0],
+            fill_value=np.nan,
+            rescale=True
+        )
 
-                    # plt.scatter(T, rho, c='black')
-                    # plt.plot(log_P_contour_points[i_log_P][0][:, 1], log_P_contour_points[i_log_P][0][:, 0], 'b-')
-                    # plt.plot(s_contour_points[i_s][0][:, 0], s_contour_points[i_s][0][:, 1], 'r-')
-                    #
-                    # plt.xscale('log')
-                    # plt.yscale('log')
-                    # plt.show()
-                # else:
-                #     plt.close()
-
-        print(f'{invalid_point_count}/{n*n} rejected')
-        rhoT_Ps_interpolation_points = np.array(rhoT_Ps_interpolation_points)
-
-        plt.scatter(rhoT_Ps_interpolation_points[:, 3], rhoT_Ps_interpolation_points[:, 2])
-        plt.xscale('log')
-        plt.yscale('log')
-        plt.show()
-
-        # self.rho_PT_interpolator = LinearNDInterpolator(
-        #     PT_rho_interpolation_points[:, :2],
-        #     PT_rho_interpolation_points[:, 2],
-        #     fill_value=np.nan,
-        #     rescale=True
-        # )
-        #
-        # self.rho_Ps_interpolator = LinearNDInterpolator(
-        #     Ps_rhoT_interpolation_points[:, :2],
-        #     Ps_rhoT_interpolation_points[:, 2],
-        #     fill_value=np.nan,
-        #     rescale=True
-        # )
-        #
-        # self.T_Ps_interpolator = LinearNDInterpolator(
-        #     Ps_rhoT_interpolation_points[:, :2],
-        #     Ps_rhoT_interpolation_points[:, 3],
-        #     fill_value=np.nan,
-        #     rescale=True
-        # )
+        self.T_logPs_interpolator = LinearNDInterpolator(
+            rhoT_logPs_interpolation_points[:, 2:],
+            rhoT_logPs_interpolation_points[:, 1],
+            fill_value=np.nan,
+            rescale=True
+        )
 
         print('Interpolators initialized.')
 
@@ -263,15 +237,13 @@ class eos:
             if np.any(s > self.s_max) or np.any(s < self.s_min):
                 raise OutOfEOSRangeException('s')
 
-
-
     def P_rhoT(self, rho, T):
         self.input_check(rho, T, None, None)
-        return self.P_interpolator(make_into_pair_array(rho, T))
+        return 10 ** self.logP_interpolator(make_into_pair_array(np.log10(rho), T))
 
     def s_rhoT(self, rho, T):
         self.input_check(rho, T, None, None)
-        return self.s_interpolator(make_into_pair_array(rho, T))
+        return self.s_interpolator(make_into_pair_array(np.log10(rho), T))
 
     def s_PT(self, P, T):
         self.input_check(None, T, P, None)
@@ -279,7 +251,7 @@ class eos:
 
     def rho_PT(self, P, T):
         self.input_check(None, T, P, None)
-        return self.rho_PT_interpolator(P, T)
+        return self.rho_logPT_interpolator(np.log10(P), T)
 
     def rho_Ps(self, P, s):
         self.input_check(None, None, P, s)
@@ -287,12 +259,12 @@ class eos:
         if type(P) is np.ndarray and type(s) is float:
             s = np.full_like(P, s)
 
-        res = self.rho_Ps_interpolator(P, s)
+        res = self.rho_logPs_interpolator(np.log10(P), s)
         return res
 
     def T_Ps(self, P, s):
         self.input_check(None, None, P, s)
-        return self.T_Ps_interpolator(P, s)
+        return self.T_logPs_interpolator(np.log10(P), s)
 
 
 class OutOfEOSRangeException(Exception):
@@ -309,7 +281,6 @@ class OutOfEOSRangeException(Exception):
 
 
 if __name__ == '__main__':
-    water = eos('data/AQUA_H20.txt', 'water', 304, load_tables=False)
     forsterite = eos('data/ANEOS_forsterite_S19.txt', 'forsterite', 400, load_tables=False)
+    water = eos('data/AQUA_H20.txt', 'water', 304, load_tables=False)
     iron = eos('data/ANEOS_iron_S20.txt', 'iron', 401, load_tables=False)
-
